@@ -30,6 +30,7 @@ CSS = """
 .idle-dot { color: alpha(currentColor, 0.35); }
 .status-box { padding: 12px; }
 .save-button { padding: 8px 16px; }
+row.drop-hover { background: alpha(@accent_bg_color, 0.25); border-radius: 8px; }
 """
 
 
@@ -70,6 +71,104 @@ def run_bg(fn, done=None, error=None):
         if done:
             GLib.idle_add(done, res)
     threading.Thread(target=worker, daemon=True).start()
+
+
+def ask_name(parent, heading: str, on_ok, initial: str = "", action: str = "Erstellen"):
+    entry = Gtk.Entry(text=initial, activates_default=True, placeholder_text="Name")
+    dlg = Adw.AlertDialog(heading=heading, extra_child=entry)
+    dlg.add_response("cancel", "Abbrechen")
+    dlg.add_response("ok", action)
+    dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+    dlg.set_default_response("ok")
+    dlg.set_close_response("cancel")
+
+    def resp(d, r):
+        name = entry.get_text().strip()
+        if r == "ok" and name:
+            on_ok(name)
+    dlg.connect("response", resp)
+    dlg.present(parent)
+
+
+def popup_at(popover: Gtk.Popover, widget: Gtk.Widget, x: float | None = None,
+             y: float | None = None):
+    """Popover an ein Widget hängen und beim Schliessen wieder lösen."""
+    popover.set_parent(widget)
+    popover.set_has_arrow(x is None)
+    if x is not None:
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        popover.set_pointing_to(rect)
+    popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
+    popover.popup()
+
+
+class FolderPopover(Gtk.Popover):
+    """Ordner-Auswahl für einen Clip (Häkchen = drin), optional mit Clip-Aktionen."""
+
+    def __init__(self, win: "KlippWindow", clip: library.Clip, actions: bool = False):
+        super().__init__()
+        self.win, self.clip = win, clip
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=6,
+                      margin_bottom=6, margin_start=6, margin_end=6, width_request=220)
+        title = Gtk.Label(label="In Ordner", xalign=0, margin_start=6, margin_bottom=4)
+        title.add_css_class("heading")
+        box.append(title)
+        folders = library.list_folders()
+        if not folders:
+            hint = Gtk.Label(label="Noch keine Ordner", xalign=0, margin_start=6)
+            hint.add_css_class("dim-label")
+            box.append(hint)
+        for name in folders:
+            check = Gtk.CheckButton(label=name, active=name in clip.folders)
+            check.connect("toggled", self._toggled, name)
+            box.append(check)
+        new = Gtk.Button()
+        new.set_child(Adw.ButtonContent(icon_name="list-add-symbolic", label="Neuer Ordner …",
+                                        halign=Gtk.Align.START))
+        new.add_css_class("flat")
+        new.connect("clicked", self._new)
+        box.append(new)
+        if actions:
+            box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
+            for icon, label, cb in (
+                    ("media-playback-start-symbolic", "Abspielen", lambda: win.open_clip(clip)),
+                    ("starred-symbolic" if not clip.favorite else "non-starred-symbolic",
+                     "Zu Favoriten" if not clip.favorite else "Aus Favoriten", self._fav),
+                    ("edit-copy-symbolic", "Datei kopieren", self._copy),
+                    ("user-trash-symbolic", "In den Papierkorb", lambda: win.confirm_trash(clip))):
+                b = Gtk.Button()
+                b.set_child(Adw.ButtonContent(icon_name=icon, label=label, halign=Gtk.Align.START))
+                b.add_css_class("flat")
+                b.connect("clicked", lambda _b, cb=cb: (self.popdown(), cb()))
+                box.append(b)
+        self.set_child(box)
+
+    def _toggled(self, check, name):
+        library.set_in_folder(self.clip, name, check.get_active())
+        self.win.refresh_meta()
+
+    def _new(self, *_):
+        self.popdown()
+
+        def create(name):
+            try:
+                name = library.create_folder(name)
+            except ValueError as e:
+                self.win.toast(str(e))
+                return
+            library.set_in_folder(self.clip, name, True)
+            self.win.refresh_meta()
+            self.win.toast(f"„{self.clip.title}“ liegt jetzt in „{name}“")
+        ask_name(self.win, "Neuer Ordner", create)
+
+    def _fav(self):
+        library.set_favorite(self.clip, not self.clip.favorite)
+        self.win.reload()
+
+    def _copy(self):
+        if library.copy_files_to_clipboard([self.clip.path]):
+            self.win.toast("Datei kopiert")
 
 
 # ====================================================================== Trim-Leiste
@@ -195,7 +294,7 @@ class TrimBar(Gtk.DrawingArea):
 # ====================================================================== Clip-Karte
 
 class ClipCard(Gtk.Button):
-    def __init__(self, clip: library.Clip, on_open):
+    def __init__(self, clip: library.Clip, on_open, on_menu=None):
         super().__init__()
         self.clip = clip
         self.add_css_class("flat")
@@ -206,6 +305,7 @@ class ClipCard(Gtk.Button):
         overlay = Gtk.Overlay()
         self.picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True)
         self.picture.set_size_request(288, 162)
+        clamp = Adw.Clamp(maximum_size=300, tightening_threshold=300, child=overlay)
         self.picture.add_css_class("clip-thumb")
         self.picture.set_overflow(Gtk.Overflow.HIDDEN)
         overlay.set_child(self.picture)
@@ -219,7 +319,7 @@ class ClipCard(Gtk.Button):
                              valign=Gtk.Align.START)
             star.add_css_class("fav-badge")
             overlay.add_overlay(star)
-        box.append(overlay)
+        box.append(clamp)
 
         title = Gtk.Label(label=clip.title, xalign=0, ellipsize=Pango.EllipsizeMode.END,
                           max_width_chars=30)
@@ -235,7 +335,17 @@ class ClipCard(Gtk.Button):
         drag = Gtk.DragSource(actions=Gdk.DragAction.COPY)
         drag.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(
             Gdk.FileList.new_from_list([Gio.File.new_for_path(str(self.clip.path))])))
+        drag.connect("drag-begin", lambda src, _d: src.set_icon(
+            Gtk.WidgetPaintable.new(self.picture), 40, 30))
         self.add_controller(drag)
+
+        if on_menu:
+            click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+            click.connect("pressed", lambda g, n, x, y: on_menu(self, x, y))
+            self.add_controller(click)
+            press = Gtk.GestureLongPress()
+            press.connect("pressed", lambda g, x, y: on_menu(self, x, y))
+            self.add_controller(press)
 
     def set_thumbnail(self, path: Path | None, duration: float | None):
         if path:
@@ -281,7 +391,12 @@ class PlayerPage(Adw.NavigationPage):
         self.discord_btn.add_css_class("suggested-action")
         self.discord_btn.connect("clicked", self._discord)
 
+        folder_btn = Gtk.MenuButton(icon_name="folder-symbolic", tooltip_text="In Ordner legen")
+        folder_btn.set_create_popup_func(
+            lambda mb: mb.set_popover(FolderPopover(self.win, self.clip)))
+
         header.pack_end(more)
+        header.pack_end(folder_btn)
         header.pack_end(self.fav)
         header.pack_end(self.discord_btn)
 
@@ -816,7 +931,9 @@ class KlippWindow(Adw.ApplicationWindow):
         view.add_top_bar(header)
         for name, cb in (("prefs", lambda *_: Preferences(self).present(self)),
                          ("folder", lambda *_: library.open_folder(self._library_root())),
-                         ("about", self._about)):
+                         ("about", self._about),
+                         ("folder-rename", self._rename_folder),
+                         ("folder-delete", self._delete_folder)):
             a = Gio.SimpleAction.new(name, None)
             a.connect("activate", cb)
             self.add_action(a)
@@ -824,6 +941,7 @@ class KlippWindow(Adw.ApplicationWindow):
         self.sidebar = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.sidebar.add_css_class("navigation-sidebar")
         self.sidebar.connect("row-activated", self._on_sidebar)
+        self.sidebar.set_header_func(self._sidebar_header)
         scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroller.set_child(self.sidebar)
         view.set_content(scroller)
@@ -865,6 +983,12 @@ class KlippWindow(Adw.ApplicationWindow):
         self.search = Gtk.SearchEntry(placeholder_text="Clips durchsuchen", width_chars=26)
         self.search.connect("search-changed", lambda *_: self._apply_filter())
         header.set_title_widget(self.search)
+        fmenu = Gio.Menu()
+        fmenu.append("Ordner umbenennen …", "win.folder-rename")
+        fmenu.append("Ordner löschen", "win.folder-delete")
+        self.folder_menu = Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=fmenu,
+                                          tooltip_text="Ordner", visible=False)
+        header.pack_end(self.folder_menu)
         page_view.add_top_bar(header)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -914,7 +1038,7 @@ class KlippWindow(Adw.ApplicationWindow):
         self.flow.remove_all()
         self.cards = []
         for clip in clips:
-            card = ClipCard(clip, self.open_clip)
+            card = ClipCard(clip, self.open_clip, self._card_menu)
             self.cards.append(card)
             self.flow.append(card)
             self.thumb_pool.submit(self._load_thumb, card, gen)
@@ -935,6 +1059,36 @@ class KlippWindow(Adw.ApplicationWindow):
         thumb = library.ensure_thumbnail(clip.path, duration)
         GLib.idle_add(card.set_thumbnail, thumb, duration)
 
+    def _sidebar_row(self, key, label, icon, count=None, dim=False):
+        row = Gtk.ListBoxRow()
+        row.key = key
+        box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+        box.append(Gtk.Image(icon_name=icon))
+        box.append(Gtk.Label(label=label, xalign=0, hexpand=True,
+                             ellipsize=Pango.EllipsizeMode.END))
+        if dim:
+            box.add_css_class("dim-label")
+        if count is not None:
+            n = Gtk.Label(label=str(count))
+            n.add_css_class("dim-label")
+            n.add_css_class("numeric")
+            box.append(n)
+        row.set_child(box)
+        return row
+
+    def _sidebar_header(self, row, before):
+        group = {"folder": "Ordner", "new-folder": "Ordner", "game": "Spiele"}
+        mine = group.get(row.key[0])
+        prev = group.get(before.key[0]) if before else None
+        row.set_header(self._section(mine) if mine and mine != prev else None)
+
+    @staticmethod
+    def _section(title: str) -> Gtk.Widget:
+        lbl = Gtk.Label(label=title, xalign=0, margin_start=12, margin_top=14, margin_bottom=4)
+        lbl.add_css_class("caption-heading")
+        lbl.add_css_class("dim-label")
+        return lbl
+
     def _rebuild_sidebar(self, clips):
         selected = self.filter
         while (row := self.sidebar.get_row_at_index(0)) is not None:
@@ -942,42 +1096,148 @@ class KlippWindow(Adw.ApplicationWindow):
         games: dict[str, int] = {}
         for c in clips:
             games[c.game] = games.get(c.game, 0) + 1
-        entries = [(("all", None), "Alle Clips", "view-grid-symbolic", len(clips)),
-                   (("fav", None), "Favoriten", "starred-symbolic",
-                    sum(1 for c in clips if c.favorite))]
-        entries += [(("game", g), g, "input-gaming-symbolic", n)
-                    for g, n in sorted(games.items(), key=lambda kv: kv[0].lower())]
+        rows = [self._sidebar_row(("all", None), "Alle Clips", "view-grid-symbolic", len(clips)),
+                self._sidebar_row(("fav", None), "Favoriten", "starred-symbolic",
+                                  sum(1 for c in clips if c.favorite))]
+        folder_rows = [self._sidebar_row(("folder", f), f, "folder-symbolic",
+                                         sum(1 for c in clips if f in c.folders))
+                       for f in library.list_folders()]
+        for r in folder_rows:
+            self._make_folder_row(r)
+        new_row = self._sidebar_row(("new-folder", None), "Neuer Ordner", "list-add-symbolic",
+                                    dim=True)
+        game_rows = [self._sidebar_row(("game", g), g, "input-gaming-symbolic", n)
+                     for g, n in sorted(games.items(), key=lambda kv: kv[0].lower())]
         restore = None
-        for i, (key, label, icon, count) in enumerate(entries):
-            row = Gtk.ListBoxRow()
-            row.key = key
-            box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
-            box.append(Gtk.Image(icon_name=icon))
-            box.append(Gtk.Label(label=label, xalign=0, hexpand=True,
-                                 ellipsize=Pango.EllipsizeMode.END))
-            n = Gtk.Label(label=str(count))
-            n.add_css_class("dim-label")
-            n.add_css_class("numeric")
-            box.append(n)
-            row.set_child(box)
+        for row in rows + folder_rows + [new_row] + game_rows:
             self.sidebar.append(row)
-            if i == 2:
-                row.set_header(Gtk.Separator(margin_top=6, margin_bottom=6,
-                                             margin_start=6, margin_end=6))
-            if key == selected:
+            if row.key == selected:
                 restore = row
         if restore is None:
             self.filter = ("all", None)
             restore = self.sidebar.get_row_at_index(0)
         self.sidebar.select_row(restore)
 
+    def _make_folder_row(self, row):
+        name = row.key[1]
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("drop", lambda t, value, x, y: self._drop_into(name, value))
+        drop.connect("enter", lambda *_: (row.add_css_class("drop-hover"), Gdk.DragAction.COPY)[1])
+        drop.connect("leave", lambda *_: row.remove_css_class("drop-hover"))
+        row.add_controller(drop)
+        click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+
+        def menu(g, n, x, y):
+            self.sidebar.select_row(row)
+            self._on_sidebar(self.sidebar, row)
+            m = Gio.Menu()
+            m.append("Umbenennen …", "win.folder-rename")
+            m.append("Ordner löschen", "win.folder-delete")
+            popup_at(Gtk.PopoverMenu.new_from_model(m), row, x, y)
+        click.connect("pressed", menu)
+        row.add_controller(click)
+
+    def _drop_into(self, folder: str, value) -> bool:
+        paths = {f.get_path() for f in value.get_files()}
+        added = 0
+        for card in self.cards:
+            if str(card.clip.path) in paths and folder not in card.clip.folders:
+                library.set_in_folder(card.clip, folder, True)
+                added += 1
+        if added:
+            self.refresh_meta()
+            self.toast(f"{added} Clip{'s' if added > 1 else ''} in „{folder}“ gelegt")
+        return True
+
+    def refresh_meta(self):
+        """Seitenleiste + Filter nach Änderungen an Ordnern (ohne Karten neu zu bauen)."""
+        self._rebuild_sidebar([c.clip for c in self.cards])
+        self._apply_filter()
+
+    def _card_menu(self, card, x, y):
+        popup_at(FolderPopover(self, card.clip, actions=True), card, x, y)
+
+    def confirm_trash(self, clip: library.Clip):
+        dlg = Adw.AlertDialog(heading="Clip löschen?",
+                              body=f"„{clip.title}“ wird in den Papierkorb verschoben.")
+        dlg.add_response("cancel", "Abbrechen")
+        dlg.add_response("delete", "Löschen")
+        dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def resp(d, r):
+            if r != "delete":
+                return
+            try:
+                library.trash(clip)
+            except Exception as e:  # noqa: BLE001
+                self.toast(f"Löschen fehlgeschlagen: {e}")
+                return
+            self.reload()
+            self.toast("In den Papierkorb verschoben")
+        dlg.connect("response", resp)
+        dlg.present(self)
+
+    def _new_folder(self):
+        def create(name):
+            try:
+                name = library.create_folder(name)
+            except ValueError as e:
+                self.toast(str(e))
+                return
+            self.filter = ("folder", name)
+            self.refresh_meta()
+        ask_name(self, "Neuer Ordner", create)
+
+    def _rename_folder(self, *_):
+        kind, old = self.filter
+        if kind != "folder":
+            return
+
+        def done(new):
+            try:
+                new = library.rename_folder(old, new)
+            except ValueError as e:
+                self.toast(str(e))
+                return
+            for c in self.cards:
+                c.clip.folders = [new if f == old else f for f in c.clip.folders]
+            self.filter = ("folder", new)
+            self.refresh_meta()
+        ask_name(self, "Ordner umbenennen", done, initial=old, action="Umbenennen")
+
+    def _delete_folder(self, *_):
+        kind, name = self.filter
+        if kind != "folder":
+            return
+        dlg = Adw.AlertDialog(heading=f"„{name}“ löschen?",
+                              body="Nur der Ordner wird gelöscht – die Clips bleiben erhalten.")
+        dlg.add_response("cancel", "Abbrechen")
+        dlg.add_response("delete", "Ordner löschen")
+        dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def resp(d, r):
+            if r != "delete":
+                return
+            library.delete_folder(name)
+            for c in self.cards:
+                c.clip.folders = [f for f in c.clip.folders if f != name]
+            self.filter = ("all", None)
+            self.refresh_meta()
+        dlg.connect("response", resp)
+        dlg.present(self)
+
     def _on_sidebar(self, box, row):
-        if getattr(row, "key", None):
-            self.filter = row.key
-            self._apply_filter()
-            if self.nav.get_visible_page() is not self.library_page:
-                self.nav.pop_to_tag("library")
-            self.split.set_show_content(True)
+        key = getattr(row, "key", None)
+        if not key:
+            return
+        if key[0] == "new-folder":
+            GLib.idle_add(lambda: (self.refresh_meta(), self._new_folder(), False)[2])
+            return
+        self.filter = key
+        self._apply_filter()
+        if self.nav.get_visible_page() is not self.library_page:
+            self.nav.pop_to_tag("library")
+        self.split.set_show_content(True)
 
     def _filter_card(self, child) -> bool:
         return self._filter_card_clip(child.get_child().clip)
@@ -989,10 +1249,16 @@ class KlippWindow(Adw.ApplicationWindow):
         visible = sum(1 for c in self.cards if self._filter_card_clip(c.clip))
         self.heading.set_label(title)
         self.library_page.set_title(title)
+        self.folder_menu.set_visible(kind == "folder")
         if visible:
             self.stack.set_visible_child_name("grid")
         else:
-            if self.cards:
+            if kind == "folder" and not self.search.get_text():
+                self.empty.set_title("Ordner ist leer")
+                self.empty.set_description("Rechtsklick auf einen Clip und Häkchen bei diesem Ordner "
+                                           "setzen – oder den Clip hierher in die Seitenleiste ziehen.")
+                self.empty.set_icon_name("folder-symbolic")
+            elif self.cards:
                 self.empty.set_title("Nichts gefunden" if self.search.get_text() else "Keine Clips hier")
                 self.empty.set_description(None)
                 self.empty.set_icon_name("edit-find-symbolic")
@@ -1007,6 +1273,8 @@ class KlippWindow(Adw.ApplicationWindow):
         if kind == "fav" and not clip.favorite:
             return False
         if kind == "game" and clip.game != value:
+            return False
+        if kind == "folder" and value not in clip.folders:
             return False
         q = self.search.get_text().strip().lower()
         return not q or q in clip.title.lower() or q in clip.game.lower()

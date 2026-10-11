@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +33,7 @@ class Clip:
     created: float
     favorite: bool = False
     duration: float | None = None
+    folders: list[str] = field(default_factory=list)
 
     @property
     def title(self) -> str:
@@ -84,6 +85,59 @@ def drop_entry(path: Path) -> None:
         index.pop(str(path), None)
 
 
+# ---------------------------------------------------------------- Eigene Ordner
+# Virtuelle Ordner wie Alben: die Datei bleibt im Spielordner, ein Clip kann in
+# mehreren Ordnern liegen. Die Liste steht unter FOLDERS_KEY im Index.
+
+FOLDERS_KEY = "__folders__"
+
+
+def list_folders() -> list[str]:
+    return list(read_index().get(FOLDERS_KEY) or [])
+
+
+def create_folder(name: str) -> str:
+    name = name.strip()[:60]
+    if not name:
+        raise ValueError("Name fehlt")
+    with _locked_index() as index:
+        folders = index.setdefault(FOLDERS_KEY, [])
+        if any(f.lower() == name.lower() for f in folders):
+            raise ValueError(f"„{name}“ gibt es schon")
+        folders.append(name)
+    return name
+
+
+def rename_folder(old: str, new: str) -> str:
+    new = new.strip()[:60]
+    if not new:
+        raise ValueError("Name fehlt")
+    with _locked_index() as index:
+        folders = index.setdefault(FOLDERS_KEY, [])
+        if any(f.lower() == new.lower() and f != old for f in folders):
+            raise ValueError(f"„{new}“ gibt es schon")
+        index[FOLDERS_KEY] = [new if f == old else f for f in folders]
+        for key, meta in index.items():
+            if key != FOLDERS_KEY and old in (meta.get("folders") or []):
+                meta["folders"] = [new if f == old else f for f in meta["folders"]]
+    return new
+
+
+def delete_folder(name: str) -> None:
+    """Ordner entfernen – die Clips bleiben erhalten."""
+    with _locked_index() as index:
+        index[FOLDERS_KEY] = [f for f in index.get(FOLDERS_KEY, []) if f != name]
+        for key, meta in index.items():
+            if key != FOLDERS_KEY and name in (meta.get("folders") or []):
+                meta["folders"] = [f for f in meta["folders"] if f != name]
+
+
+def set_in_folder(clip: Clip, folder: str, inside: bool) -> None:
+    folders = [f for f in clip.folders if f != folder] + ([folder] if inside else [])
+    update_entry(clip.path, folders=folders, game=clip.game, created=clip.created)
+    clip.folders = folders
+
+
 def scan(cfg: Config) -> list[Clip]:
     root = cfg.library_path
     index = read_index()
@@ -101,7 +155,8 @@ def scan(cfg: Config) -> list[Clip]:
                     created = meta.get("created") or p.stat().st_mtime
                 except OSError:
                     continue
-                clips.append(Clip(p, game, created, bool(meta.get("favorite")), meta.get("duration")))
+                clips.append(Clip(p, game, created, bool(meta.get("favorite")),
+                                  meta.get("duration"), list(meta.get("folders") or [])))
     clips.sort(key=lambda c: c.created, reverse=True)
     return clips
 
@@ -305,7 +360,8 @@ def trim(clip: Clip, start: float, end: float) -> Path:
         dest.unlink(missing_ok=True)
         raise RuntimeError(r.stderr.strip()[-400:] or "ffmpeg fehlgeschlagen")
     duration = probe_duration(dest)
-    update_entry(dest, game=clip.game, created=time.time(), duration=duration)
+    update_entry(dest, game=clip.game, created=time.time(), duration=duration,
+                 folders=list(clip.folders))
     ensure_thumbnail(dest, duration)
     return dest
 

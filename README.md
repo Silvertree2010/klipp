@@ -6,6 +6,7 @@ Instant-replay game clips for Linux, like Medal, built on [GPU Screen Recorder](
 - **Press a hotkey** (Alt+F10 by default, change it in the settings): the clip is saved, with a shutter sound and a notification that shows a thumbnail
 - **Sorted by game**: Steam games are detected by their app ID (Proton too), anything else by its window
 - **Library**: thumbnails, search, favorites and a sidebar with every game
+- **Folders**: create your own folders (like albums) and sort clips into them by right-clicking or dragging; a clip can be in several folders and the files stay where they are
 - **Player with trimming**: drag the handles and click "Schnitt speichern" (save cut); the original is kept
 - **Discord-ready**: compresses clips to 10/50/500 MB and copies them to the clipboard, or you can drag cards straight into Discord
 
