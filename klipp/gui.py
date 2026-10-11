@@ -691,6 +691,16 @@ class Preferences(Adw.PreferencesDialog):
         self.seconds.set_value(self.cfg.clip_seconds)
         rec.add(self.seconds)
 
+        self.autostart = Adw.SwitchRow(title="Beim Login starten",
+                                       subtitle="Instant Replay läuft automatisch nach dem Hochfahren")
+        if _has_service():
+            self.autostart.set_active(_service_enabled())
+            self.autostart.connect("notify::active", self._toggle_autostart)
+        else:
+            self.autostart.set_sensitive(False)
+            self.autostart.set_subtitle("Erst mit install.sh installieren")
+        rec.add(self.autostart)
+
         self.fps = self._combo("Bildrate", [f"{f} FPS" for f in self.FPS],
                                self.FPS.index(self.cfg.fps) if self.cfg.fps in self.FPS else 1)
         rec.add(self.fps)
@@ -746,6 +756,17 @@ class Preferences(Adw.PreferencesDialog):
         info.add(self.sound)
 
         self.connect("closed", self._save)
+
+    def _toggle_autostart(self, row, _pspec):
+        action = "enable" if row.get_active() else "disable"
+        r = subprocess.run(["systemctl", "--user", action, "klipp.service"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            self.add_toast(Adw.Toast(title=f"Autostart: {r.stderr.strip() or 'fehlgeschlagen'}"))
+            row.set_active(_service_enabled())
+        else:
+            self.add_toast(Adw.Toast(title="Startet ab jetzt beim Login" if row.get_active()
+                                     else "Startet nicht mehr automatisch"))
 
     # -- Hotkey
     GTK_MODS = {"SUPER": "<Super>", "CTRL": "<Control>", "ALT": "<Alt>", "SHIFT": "<Shift>"}
@@ -1414,6 +1435,12 @@ class KlippWindow(Adw.ApplicationWindow):
                         comments="Instant-Replay-Clips für Linux – wie Medal, "
                                  "auf Basis von GPU Screen Recorder.",
                         license_type=Gtk.License.MIT_X11).present(self)
+
+
+def _service_enabled() -> bool:
+    r = subprocess.run(["systemctl", "--user", "is-enabled", "klipp.service"],
+                       capture_output=True, text=True, timeout=5)
+    return r.stdout.strip() == "enabled"
 
 
 def _has_service() -> bool:
