@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Klipp
+GenericName=Clip-Recorder
+Comment=Instant-Replay-Clips aufnehmen, schneiden und teilen
+Exec=klipp %F
+Icon=dev.klipp.Klipp
+Terminal=false
+Categories=AudioVideo;Video;Recorder;Game;
+Keywords=medal;clip;replay;shadowplay;recorder;aufnahme;
+MimeType=video/mp4;
+StartupNotify=true
+Actions=save;
+
+[Desktop Action save]
+Name=Clip speichern
+Exec=klipp save
