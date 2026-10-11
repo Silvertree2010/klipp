@@ -58,22 +58,6 @@ systemctl --user daemon-reload
 systemctl --user enable klipp.service &>/dev/null
 systemctl --user restart klipp.service
 
-# Hotkey: klassische hyprland.conf automatisch, Lua-Config nur als Hinweis
-HYPR="$HOME/.config/hypr/hyprland.conf"
-BIND="bind = ALT, F10, exec, $BIN save"
-if [[ -n "${KLIPP_NO_HOTKEY:-}" ]]; then
-  say "Hotkey übersprungen (KLIPP_NO_HOTKEY)."
-elif grep -qs "klipp save" "$HOME"/.config/hypr/*.conf "$HOME"/.config/hypr/**/*.lua 2>/dev/null; then
-  say "Hotkey ist schon eingerichtet."
-elif [[ -f "$HYPR" ]] && ! compgen -G "$HOME/.config/hypr/*.lua" >/dev/null && \
-     ! compgen -G "$HOME/.config/hypr/config/*.lua" >/dev/null; then
-  printf '\n# Klipp – Clip speichern\n%s\n' "$BIND" >> "$HYPR"
-  hyprctl reload &>/dev/null || true
-  say "Hotkey Alt+F10 in hyprland.conf eingetragen."
-else
-  say "Hotkey bitte selbst in der Hyprland-Config eintragen – Befehl: $BIN save"
-fi
-
 sleep 2
 "$BIN" status || true
-say "Fertig. Klipp im App-Launcher öffnen, im Spiel Alt+F10 drücken."
+say "Fertig. Klipp im App-Launcher öffnen – im Spiel Alt+F10 drücken (Hotkey in den Einstellungen änderbar)."

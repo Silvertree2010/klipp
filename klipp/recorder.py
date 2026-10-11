@@ -155,10 +155,16 @@ def build_command(cfg: Config, incoming: Path) -> list[str]:
     return cmd
 
 
+_state: dict = {}
+_state_lock = __import__("threading").Lock()
+
+
 def _write_state(**st) -> None:
-    tmp = state_path().with_suffix(".tmp")
-    tmp.write_text(json.dumps({"daemon_pid": os.getpid(), **st}))
-    tmp.replace(state_path())
+    with _state_lock:
+        _state.update(st)
+        tmp = state_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps({**_state, "daemon_pid": os.getpid()}))
+        tmp.replace(state_path())
 
 
 def run_daemon() -> int:
@@ -186,6 +192,10 @@ def run_daemon() -> int:
         _write_state(recording=False, error="gpu-screen-recorder ist nicht installiert")
         print("klipp: gpu-screen-recorder fehlt", file=sys.stderr)
         return 1
+
+    from .hotkey import HotkeyManager
+    hotkeys = HotkeyManager(lambda mode, err: _write_state(hotkey_mode=mode, hotkey_error=err))
+    hotkeys.start()
 
     backoff = 2.0
     while not stop:
@@ -221,6 +231,7 @@ def run_daemon() -> int:
             time.sleep(0.25)
         reload = False
 
-    _write_state(recording=False, error=None)
+    hotkeys.shutdown()
+    _write_state(recording=False, error=None, hotkey_mode=None)
     socket_path().unlink(missing_ok=True)
     return 0

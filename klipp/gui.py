@@ -14,8 +14,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import __version__, library, recorder  # noqa: E402
-from .config import APP_ID, HOTKEY_HINT, INDEX_FILE, Config  # noqa: E402
+from . import __version__, hotkey, library, recorder  # noqa: E402
+from .config import APP_ID, INDEX_FILE, Config  # noqa: E402
 
 CSS = """
 .clip-card { padding: 6px; border-radius: 16px; }
@@ -556,6 +556,16 @@ class Preferences(Adw.PreferencesDialog):
         page = Adw.PreferencesPage(title="Allgemein", icon_name="emblem-system-symbolic")
         self.add(page)
 
+        keys = Adw.PreferencesGroup(title="Hotkey")
+        page.add(keys)
+        self.hotkey_row = Adw.ActionRow(title="Clip speichern", activatable=True)
+        self.hotkey_label = Adw.ShortcutLabel(disabled_text="Kein Hotkey", valign=Gtk.Align.CENTER)
+        self.hotkey_row.add_suffix(self.hotkey_label)
+        self.hotkey_row.add_suffix(Gtk.Image(icon_name="document-edit-symbolic"))
+        self.hotkey_row.connect("activated", self._capture_hotkey)
+        keys.add(self.hotkey_row)
+        self._show_hotkey()
+
         rec = Adw.PreferencesGroup(title="Instant Replay",
                                    description="Klipp nimmt im Hintergrund auf und speichert "
                                                "auf Tastendruck die letzten Sekunden.")
@@ -612,24 +622,99 @@ class Preferences(Adw.PreferencesDialog):
                                  if self.cfg.discord_limit_mb in [k for k, _ in self.LIMITS] else 0)
         lib.add(self.limit)
 
-        info = Adw.PreferencesGroup(title="Benachrichtigung & Hotkey")
+        info = Adw.PreferencesGroup(title="Benachrichtigung")
         page.add(info)
         self.notif = Adw.SwitchRow(title="Benachrichtigung beim Speichern",
                                    active=self.cfg.notifications)
         self.sound = Adw.SwitchRow(title="Auslöser-Ton", active=self.cfg.sound)
         info.add(self.notif)
         info.add(self.sound)
-        hk = Adw.ActionRow(title="Hotkey (Hyprland)", subtitle=HOTKEY_HINT, subtitle_selectable=True)
-        hk.add_css_class("property")
-        copy = Gtk.Button(icon_name="edit-copy-symbolic", valign=Gtk.Align.CENTER,
-                          tooltip_text="Zeile kopieren")
-        copy.add_css_class("flat")
-        copy.connect("clicked", lambda *_: (self.get_clipboard().set(HOTKEY_HINT),
-                                            self.add_toast(Adw.Toast(title="Kopiert"))))
-        hk.add_suffix(copy)
-        info.add(hk)
 
         self.connect("closed", self._save)
+
+    # -- Hotkey
+    GTK_MODS = {"SUPER": "<Super>", "CTRL": "<Control>", "ALT": "<Alt>", "SHIFT": "<Shift>"}
+    BARE_OK = {f"F{i}" for i in range(1, 25)} | {"Print", "Pause", "Scroll_Lock", "Insert"}
+
+    def _show_hotkey(self, note: str | None = None):
+        p = hotkey.parse(self.cfg.hotkey)
+        accel = "".join(self.GTK_MODS[m] for m in p[0]) + p[1] if p else ""
+        self.hotkey_label.set_accelerator(accel)
+        if note:
+            self.hotkey_row.set_subtitle(note)
+            return
+        st = recorder.read_state()
+        mode = st.get("hotkey_mode")
+        if not p:
+            sub = "Aus – nur über den Knopf in der App"
+        elif not st.get("daemon_pid"):
+            sub = "Aktiv, sobald Instant Replay läuft"
+        elif mode == "hyprland":
+            sub = "Aktiv – funktioniert überall, auch im Vollbild-Spiel"
+        elif mode == "evdev":
+            sub = "Aktiv – direkt über die Tastatur"
+        else:
+            sub = st.get("hotkey_error") or "Wird gesetzt …"
+        self.hotkey_row.set_subtitle(sub + "  ·  klicken zum Ändern")
+
+    def _capture_hotkey(self, *_):
+        old = self.cfg.hotkey
+        hotkey.hypr_unbind(old)  # damit die alte Kombi beim Drücken hier ankommt
+        dlg = Adw.AlertDialog(heading="Neuen Hotkey drücken",
+                              body="Zum Beispiel Alt + F10.\n"
+                                   "Esc = abbrechen · Rücktaste = Hotkey entfernen")
+        dlg.add_response("cancel", "Abbrechen")
+        dlg.set_close_response("cancel")
+        result = {"combo": None}
+
+        def pressed(ctrl, keyval, keycode, state):
+            if keyval == Gdk.KEY_Escape:
+                dlg.close()
+                return True
+            if keyval == Gdk.KEY_BackSpace and not state & Gtk.accelerator_get_default_mod_mask():
+                result["combo"] = ""
+                dlg.close()
+                return True
+            ok, base, *_ = self.get_display().translate_key(keycode, 0, 0)
+            name = Gdk.keyval_name(base if ok else keyval) or ""
+            if name.startswith(("Shift", "Control", "Alt", "Super", "Meta", "ISO_", "Caps")):
+                return True
+            mods = [m for m, mask in (("SUPER", Gdk.ModifierType.SUPER_MASK),
+                                      ("CTRL", Gdk.ModifierType.CONTROL_MASK),
+                                      ("ALT", Gdk.ModifierType.ALT_MASK),
+                                      ("SHIFT", Gdk.ModifierType.SHIFT_MASK)) if state & mask]
+            if not mods and name not in self.BARE_OK:
+                dlg.set_body("Bitte mit Strg, Alt oder Super kombinieren – sonst löst es beim "
+                             "Tippen aus.\nEsc = abbrechen")
+                return True
+            combo = "+".join(mods + [name])
+            clash = hotkey.hypr_conflict(combo)
+            if clash:
+                dlg.set_body(f"{hotkey.pretty(combo)} ist schon belegt ({clash}).\n"
+                             "Bitte eine andere Kombination drücken.")
+                return True
+            result["combo"] = combo
+            dlg.close()
+            return True
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", pressed)
+        dlg.add_controller(keys)
+
+        def closed(*_):
+            combo = result["combo"]
+            if combo is not None and combo != old:
+                self.cfg.hotkey = combo
+                saved = Config.load()
+                saved.hotkey = combo
+                saved.save()
+                self._show_hotkey("Gespeichert – wird in ein paar Sekunden aktiv")
+                GLib.timeout_add_seconds(4, lambda: (self._show_hotkey(), False)[1])
+                self.win.refresh_status()
+            else:
+                self._show_hotkey()
+        dlg.connect("closed", closed)
+        dlg.present(self)
 
     @staticmethod
     def _combo(title, items, selected):
@@ -811,7 +896,8 @@ class KlippWindow(Adw.ApplicationWindow):
         st = recorder.read_state()
         secs = Config.load().clip_seconds
         if st.get("running"):
-            return f"Drück im Spiel deinen Hotkey (Alt+F10), um die letzten {secs} Sekunden zu speichern."
+            key = hotkey.pretty(Config.load().hotkey)
+            return f"Drück im Spiel {key}, um die letzten {secs} Sekunden zu speichern."
         return "Schalte unten links Instant Replay ein – dann speichert dein Hotkey die letzten Sekunden."
 
     # -- Daten

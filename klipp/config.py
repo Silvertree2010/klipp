@@ -13,7 +13,6 @@ INDEX_FILE = DATA_DIR / "index.json"
 THUMB_DIR = CACHE_DIR / "thumbs"
 
 APP_ID = "dev.klipp.Klipp"
-HOTKEY_HINT = "bind = ALT, F10, exec, klipp save"
 
 
 def runtime_dir() -> Path:
@@ -46,6 +45,7 @@ class Config:
     desktop_audio: bool = True
     microphone: bool = False
     cursor: bool = True
+    hotkey: str = "ALT+F10"         # leer = kein Hotkey
     library: str = "~/Videos/Klipp"
     discord_limit_mb: int = 10
     notifications: bool = True

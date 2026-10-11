@@ -3,7 +3,7 @@
 Instant-replay game clips for Linux, like Medal, built on [GPU Screen Recorder](https://git.dec05eba.com/gpu-screen-recorder/).
 
 - **Always recording in the background**: Klipp keeps the last 30 s (configurable) in RAM and barely costs any FPS thanks to NVENC
-- **Press a hotkey** (Alt+F10): the clip is saved, with a shutter sound and a notification that shows a thumbnail
+- **Press a hotkey** (Alt+F10 by default, change it in the settings): the clip is saved, with a shutter sound and a notification that shows a thumbnail
 - **Sorted by game**: Steam games are detected by their app ID (Proton too), anything else by its window
 - **Library**: thumbnails, search, favorites and a sidebar with every game
 - **Player with trimming**: drag the handles and click "Schnitt speichern" (save cut); the original is kept
@@ -19,7 +19,7 @@ git clone https://github.com/Silvertree2010/klipp.git ~/klipp && cd ~/klipp
 ./install.sh
 ```
 
-The installer pulls missing packages and installs Klipp to `~/.local`. It enables `klipp.service`, so instant replay starts whenever you log in. With a classic `hyprland.conf` it adds the Alt+F10 hotkey itself. With a Lua config you have to bind a key to `~/.local/bin/klipp save` yourself.
+The installer pulls missing packages and installs Klipp to `~/.local`. It enables `klipp.service`, so instant replay starts whenever you log in. Klipp registers the hotkey with Hyprland at runtime, so there is nothing to add to your Hyprland config (Lua or classic). On other compositors it falls back to reading the keyboard directly, which needs read access to `/dev/input` (the `input` group).
 
 Update: `git pull && ./install.sh`. Uninstall: `./install.sh --remove`. Your clips and settings are kept.
 
